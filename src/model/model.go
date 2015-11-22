@@ -3,11 +3,11 @@ package model
 import (
 	"../constant"
 	"database/sql"
-	"fmt"
+	//"fmt"
 	_ "github.com/go-sql-driver/mysql"
 	"gopkg.in/redis.v3"
-	"io/ioutil"
 	"log"
+	"io/ioutil"
 	"math/rand"
 	"os"
 	"strconv"
@@ -55,12 +55,32 @@ type userType struct {
 	id, name, password string
 }
 
+type cartType struct {
+	food_id string
+	count int
+}
+
 var cache_user = make(map[string]userType) //token -> UserType
 var cache_userid = make(map[string]string) //name -> id
+var cache_user_order = make(map[string]string)
 var cache_food_price = make(map[string]int)
 var cache_food_stock = make(map[string]int)
 var cache_token_user = make(map[string]string)
 var cache_food_last_update_time int
+var cache_cart_user = make(map[string]string)
+var cache_cart = make(map[string][]cartType)
+var cache_order_cart = make(map[string]string)
+
+var addFood, queryStock, placeOrder *redis.Script
+func Load_script_from_file(filename string) *redis.Script {
+	   command_raw, err := ioutil.ReadFile(filename)
+	   if err != nil {
+			   L.Fatal("Failed to load script " + filename)
+	   }
+	   command := string(command_raw)
+	   //return r.ScriptLoad(command).Val()
+	   return redis.NewScript(command)
+}
 
 func atoi(str string) int {
 	res, err := strconv.Atoi(str)
@@ -70,22 +90,7 @@ func atoi(str string) int {
 	return res
 }
 
-var addFood, queryStock, placeOrder *redis.Script
-
-func Load_script_from_file(filename string) *redis.Script {
-	command_raw, err := ioutil.ReadFile(filename)
-	if err != nil {
-		L.Fatal("Failed to load script " + filename)
-	}
-	command := string(command_raw)
-	//return r.ScriptLoad(command).Val()
-	return redis.NewScript(command)
-}
-
 func PostLogin(username string, password string) (int, string, string) {
-	//fmt.Println("username=" + username)
-	//fmt.Println("password=" + password)
-
 	user_id, ok := cache_userid[username]
 	if !ok {
 		return -1, "", ""
@@ -97,9 +102,6 @@ func PostLogin(username string, password string) (int, string, string) {
 	}
 
 	token := RandString(8)
-	//fmt.Println("token = " + token)
-	s := fmt.Sprintf("token:%s:user", token)
-	r.Set(s, user_id, 0)
 	cache_token_user[token] = user_id
 	return 0, user_id, token
 }
@@ -108,13 +110,7 @@ func get_token_user(token string) string {
 	if id, ok := cache_token_user[token]; ok {
 		return id
 	} else {
-		s := fmt.Sprintf("token:%s:user", token)
-		user_id := r.Get(s).Val()
-		if user_id != "" {
-			cache_token_user[token] = user_id
-		}
-
-		return user_id
+		return ""
 	}
 }
 
@@ -128,41 +124,36 @@ func Is_token_exist(token string) bool {
 
 func Create_cart(token string) string {
 	cartid := RandString(32)
-	r.Set(fmt.Sprintf("cart:%s:user", cartid), get_token_user(token), 0)
+	cache_cart_user[cartid] = get_token_user(token)
 	return cartid
 }
 
 func Cart_add_food(token, cartid string, foodid int, count int) int {
 	foodid_s := strconv.Itoa(foodid)
-	count_s := strconv.Itoa(count)
-	num, exist := cache_food_price[foodid_s]
+	_, exist := cache_food_price[foodid_s]
 	if !exist {
-		L.Print(foodid, " has ", num)
 		return -2
 	}
-	res, err := addFood.Run(
-		r,
-		[]string{token, cartid, foodid_s, count_s},
-		[]string{}).Result()
-
-	if err != nil {
-		L.Fatal(err)
+	belong_user := cache_token_user[token]
+	cart_user, ok := cache_cart_user[cartid]
+	if !ok {
+		return -1
 	}
-
-	return int(res.(int64))
+	if cart_user != belong_user {
+		return -4
+	}
+	sum := 0
+	for _, v := range cache_cart[cartid] {
+		sum += v.count
+	}
+	if sum + count > 3 {
+		return -3
+	}
+	cache_cart[cartid] = append(cache_cart[cartid], cartType{foodid_s, count})
+	return 0
 }
 
 func Get_foods() []map[string]interface{} {
-	stock_delta := queryStock.Run(
-		r,
-		[]string{strconv.Itoa(cache_food_last_update_time)},
-		[]string{}).Val().([]interface{})
-	cache_food_last_update_time, _ = stock_delta[1].(int)
-	for i := 2; i < len(stock_delta); i += 2 {
-		id := stock_delta[i].(string)
-		stock, _ := strconv.Atoi(stock_delta[i+1].(string))
-		cache_food_stock[id] = stock
-	}
 	var ret []map[string]interface{}
 	for k, _ := range cache_food_price {
 		food_id, _ := strconv.Atoi(k)
@@ -177,32 +168,50 @@ func Get_foods() []map[string]interface{} {
 
 func PostOrder(cart_id string, token string) (int, string) {
 	order_id := RandString(8)
-	res, err := placeOrder.Run(r, []string{cart_id, order_id, token}, []string{}).Result()
-	if err != nil {
-		L.Fatal("Failed to post order, err:", err)
+
+	user_id, _ := cache_token_user[token]
+	belong_user, ok2 := cache_cart_user[cart_id]
+	user_order, _ := cache_user_order[user_id]
+	if !ok2 {
+		return -1, order_id
 	}
-	rtn := int(res.(int64))
-	return rtn, order_id
+	if user_id != belong_user {
+		return -2, order_id
+	}
+	if user_order != "" {
+		return -4, order_id
+	}
+
+	for _, v := range cache_cart[cart_id] {
+		if cache_food_stock[v.food_id] < v.count {
+			return -3, order_id
+		}
+	}
+	for _, v := range cache_cart[cart_id] {
+		cache_food_stock[v.food_id] -= v.count
+	}
+	cache_user_order[user_id] = order_id
+	cache_order_cart[order_id] = cart_id
+
+	return 0, order_id
 }
 
 func GetOrder(token string) (ret map[string]interface{}, found bool) {
 	userid := get_token_user(token)
 	uid, _ := strconv.Atoi(userid)
-	orderid := r.Get(fmt.Sprintf("user:%s:order", get_token_user(token))).Val()
+	orderid := cache_user_order[userid]
 	if orderid == "" {
 		found = false
 		return
 	}
 	found = true
-	cartid := r.HGet("order:cart", orderid).Val()
-	items := r.HGetAll(fmt.Sprintf("cart:%s", cartid)).Val()
+	cartid := cache_order_cart[orderid]
 	var item_arr []map[string]int
 	total := 0
-	for i := 0; i < len(items); i += 2 {
-		food := items[i]
-		count := items[i+1]
+	for _, v := range cache_cart[cartid] {
+		food := v.food_id
 		f, _ := strconv.Atoi(food)
-		c, _ := strconv.Atoi(count)
+		c := v.count
 		price := cache_food_price[food]
 		total += price * c
 		item_arr = append(item_arr, map[string]int{"food_id": f, "count": c})

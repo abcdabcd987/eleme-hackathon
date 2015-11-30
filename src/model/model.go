@@ -76,8 +76,8 @@ var cache_food_price = make(map[string]int)
 var cache_food_stock = make(map[string]int)
 var cache_token_user = make(map[string]string)
 
-var mutex_cache_food_stock sync.Mutex
-var mutex_cache_token_user sync.Mutex
+var mutex_cache_food_stock sync.RWMutex
+var mutex_cache_token_user sync.RWMutex
 
 var ret_get_foods []byte
 
@@ -130,9 +130,9 @@ func PostLogin(username string, password string) (int, int, string) {
 }
 
 func get_token_user(token string) string {
-	mutex_cache_token_user.Lock()
+	mutex_cache_token_user.RLock()
 	id, ok := cache_token_user[token]
-	mutex_cache_token_user.Unlock()
+	mutex_cache_token_user.RUnlock()
 
 	if ok {
 		return id
@@ -352,9 +352,9 @@ func init_cache_and_redis(init_redis bool) {
 			sort.Strings(keys)
 			for _, v := range keys {
 				k := v
-				mutex_cache_food_stock.Lock()
+				mutex_cache_food_stock.RLock()
 				_stock := cache_food_stock[k]
-				mutex_cache_food_stock.Unlock()
+				mutex_cache_food_stock.RUnlock()
 
 				_stock_s := strconv.Itoa(_stock)
 				_price_s := strconv.Itoa(cache_food_price[k])

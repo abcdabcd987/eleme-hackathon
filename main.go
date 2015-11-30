@@ -267,6 +267,7 @@ func parse_request_body(r *rest.Request, data *interface{}) int {
 
 /* Util function */
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
+var heapprofile = flag.String("heapprofile", "", "write heap profile to file")
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -286,6 +287,13 @@ func main() {
 	go func() {
 		<-c
 		pprof.StopCPUProfile()
+		if *heapprofile != "" {
+			f, err := os.Create(*heapprofile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			pprof.WriteHeapProfile(f)
+		}
 		os.Exit(0)
 	}()
 

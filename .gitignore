@@ -7,4 +7,7 @@
 *.prof
 *.lprof
 .DS_Store
-src/github.com/garyburd/
+src/github.com/
+src/gopkg.in/
+pkg/
+*.png
